@@ -241,9 +241,16 @@ test('подкатегории: добавить списком, угадать,
 
   await say('аптека 500');
   assert.match(lastText(), /💊 Здоровье › Аптека/);
-  await say('таблетки 300');
+  await say('нурофен 300');
+  assert.match(lastText(), /Здоровье › Аптека/, 'синонимы подкатегории: нурофен → Аптека');
+  await say('здоровье витамины для мамы 300');
   const pills = (await txs()).at(-1);
-  assert.equal(pills.category_id, health.id, 'без подходящей подкатегории — в саму категорию');
+  assert.equal(pills.category_id, subs[0].id, 'витамины — тоже аптека');
+  await say('здоровье массаж спины 300');
+  const vague = (await txs()).at(-1);
+  assert.equal(vague.category_id, health.id, 'без подходящей подкатегории — в саму категорию');
+  assert.match(lastText(), /Уточнить подкатегорию в «Здоровье»/);
+  assert.ok(buttons().some((b) => b.callback_data === `t:s:${vague.id}:${subs[1].id}`), 'кнопки подкатегорий сразу под карточкой');
   await press(`t:c:${pills.id}`, OWNER, 9001);
   const picker = calls.filter((x) => x.method === 'editMessageReplyMarkup').at(-1).params.reply_markup.inline_keyboard.flat();
   assert.ok(picker.some((b) => b.callback_data === `t:p:${pills.id}:${health.id}` && /Здоровье ›/.test(b.text)));
@@ -252,18 +259,18 @@ test('подкатегории: добавить списком, угадать,
   assert.ok(subsKb.some((b) => b.callback_data === `t:s:${pills.id}:${subs[0].id}`));
   await press(`t:s:${pills.id}:${subs[0].id}`, OWNER, 9001);
   assert.equal((await db.get(`SELECT category_id FROM transactions WHERE id = ${pills.id}`)).category_id, subs[0].id);
-  await say('таблетки от головы 250');
+  await say('витамины для папы 250');
   assert.match(lastText(), /Здоровье › Аптека/, 'запомнил слово для подкатегории');
 
   await say('стоматолог 4000');
   await say('📊 Отчёт');
-  assert.match(lastText(), /Здоровье — <b>5\u00a0050 ₽<\/b>/);
+  assert.match(lastText(), /Здоровье — <b>5\u00a0650 ₽<\/b>/);
   assert.match(lastText(), /↳ Стоматолог — 4\u00a0000 ₽/);
-  assert.match(lastText(), /↳ Аптека — 1\u00a0050 ₽/);
+  assert.match(lastText(), /↳ Аптека — 1\u00a0350 ₽/);
 
   await say('/budget здоровье 5000');
   await say('врачи 100');
-  assert.match(lastText(), /🔴 Бюджет «Здоровье» превышен: 5\u00a0150 ₽/);
+  assert.match(lastText(), /🔴 Бюджет «Здоровье» превышен: 5\u00a0750 ₽/);
 
   await press(`c:rm:${health.id}`);
   assert.equal((await db.all(`SELECT * FROM categories WHERE parent_id = ${health.id} AND archived = 0`)).length, 0, 'подкатегории удалены вместе с категорией');
@@ -313,4 +320,43 @@ test('чистый чат: временные сообщения и команд
   await say('/help');
   assert.ok(!calls.some((x) => x.method === 'deleteMessage' || x.method === 'deleteMessages'), 'выключено — ничего не удаляем');
   assert.ok(greet && reportMsg);
+});
+
+test('голосом и текстом — в подкатегорию, и расход, и доход', async () => {
+  await say('/start');
+  const health = await db.get("SELECT * FROM categories WHERE user_id = 111 AND code = 'health'");
+  const salary = await db.get("SELECT * FROM categories WHERE user_id = 111 AND code = 'salary'");
+  await press(`c:as:${health.id}`);
+  await say('Аптека, Дантист');
+  await press(`c:as:${salary.id}`);
+  await say('Премия');
+  const sub = async (name) => (await db.get(`SELECT id FROM categories WHERE name = '${name}'`)).id;
+
+  await say('+30000 премия');
+  let t = (await txs()).at(-1);
+  assert.deepEqual([t.kind, t.category_id], ['income', await sub('Премия')]);
+  await say('пломба 3500');
+  assert.equal((await txs()).at(-1).category_id, await sub('Дантист'));
+
+  await say('/setkey gsk_test_key_123');
+  fetchRoutes.push({ match: '/audio/transcriptions', reply: () => ({ text: 'Потратил четыре тысячи у стоматолога, триста на лекарства и получил премию десять тысяч' }) });
+  fetchRoutes.push({
+    match: '/chat/completions',
+    reply: (url, init) => {
+      const body = JSON.parse(init.body);
+      assert.match(body.messages[0].content, /Здоровье › Дантист/, 'ИИ видит подкатегории');
+      return { choices: [{ message: { content: JSON.stringify({ items: [
+        { type: 'expense', amount: 4000, currency: 'RUB', category: 'Здоровье', note: 'стоматолог', date: '2026-10-25' },
+        { type: 'expense', amount: 300, currency: 'RUB', category: 'Здоровье › Аптека', note: 'лекарства', date: '2026-10-25' },
+        { type: 'income', amount: 10000, currency: 'RUB', category: 'Зарплата', note: 'премия', date: '2026-10-25' },
+      ] }) } }] };
+    },
+  });
+  files.set('VOICE2', new Uint8Array([1, 2, 3]));
+  await onMessage(msg(OWNER, { voice: { file_id: 'VOICE2', duration: 5, file_size: 3 } }));
+  const last3 = (await txs()).slice(-3);
+  assert.deepEqual(last3.map((x) => x.category_id), [await sub('Дантист'), await sub('Аптека'), await sub('Премия')],
+    'общая категория от ИИ уточнена до подкатегории');
+  const stt = fetchLog.find((f) => f.url.includes('/audio/transcriptions'));
+  assert.ok(stt.init.body.fields.some(([k, v]) => k === 'prompt' && /Подкатегории: .*дантист/.test(v)), 'Whisper знает подкатегории');
 });

@@ -100,7 +100,8 @@ export async function categoryPicker(userId, t) {
   return inline(kb);
 }
 
-export async function subPicker(userId, t, parentId) {
+// done — показать «✅ Готово», когда выбор подкатегории предложен сразу после записи.
+export async function subPicker(userId, t, parentId, { done = false } = {}) {
   const cats = await listCategories(userId);
   const parent = cats.find((c) => c.id === parentId);
   if (!parent) return categoryPicker(userId, t);
@@ -108,7 +109,7 @@ export async function subPicker(userId, t, parentId) {
   const mark = (id) => (id === t.category_id ? '✅ ' : '');
   const kb = [[btn(`${mark(parent.id)}${parent.emoji} ${parent.name} — в целом`, `t:s:${t.id}:${parent.id}`)]];
   kb.push(...rows(subs.map((s) => btn(`${mark(s.id)}${s.emoji || parent.emoji} ${s.name}`, `t:s:${t.id}:${s.id}`)), 2));
-  kb.push([btn('➕ Подкатегория', `t:ns:${t.id}:${parent.id}`), btn('◀️ Назад', `t:c:${t.id}`)]);
+  kb.push([btn('➕ Подкатегория', `t:ns:${t.id}:${parent.id}`), done ? btn('✏️ Другое', `t:o:${t.id}`) : btn('◀️ Назад', `t:c:${t.id}`)]);
   return inline(kb);
 }
 

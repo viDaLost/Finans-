@@ -9,7 +9,7 @@ import {
   lastCreatedTransaction, transactionsInRange, setBudget, wipeUserData,
 } from './store.js';
 import { parseText, parseAmountAndNote, parseBudgetText } from './parser.js';
-import { guessCategory, fallbackCategory, learnableWord, splitEmoji, norm, stemWord } from './categories.js';
+import { guessCategory, fallbackCategory, learnableWord, splitEmoji, norm, stemWord, hasSubs } from './categories.js';
 import { getAiConfig, aiReady, transcribe, parseWithLlm, checkKey } from './ai.js';
 import {
   localToday, dayStart, addDays, toLocal, decodePeriod, periodBounds, parsePeriodText,
@@ -329,6 +329,7 @@ function helpText() {
     '• Доход: <code>+50000 зарплата</code>, <code>зарплата 100к</code>, <code>кэшбэк 350</code>',
     '• Дата: <code>вчера обед 600</code>, <code>12.10 продукты 3400</code>, <code>в пятницу кино 800</code>',
     '• Валюта: <code>$20 подписка</code>, <code>15 евро обед</code>',
+    '• Подкатегория — просто назовите её или то, что купили: <code>стоматолог 4000</code>, <code>нурофен 300</code>, <code>+30000 премия</code>. Если бот поймёт только категорию, он предложит уточнить кнопками.',
     '• 🎙 Голосовое — то же самое, только голосом.',
     '',
     '<b>✏️ Исправить</b>',
@@ -391,8 +392,12 @@ async function resolveItems(c, text, source) {
     }
   }
   return items.map((it) => {
-    const guessed = Boolean(it.cat) && it.cat.code !== 'other' && it.cat.code !== 'other_in';
-    return { ...it, cat: it.cat || fallbackCategory(cats, it.kind), uncertain: !guessed };
+    let cat = it.cat;
+    // ИИ или словарь выбрали категорию с подкатегориями — пробуем уточнить по описанию и всей фразе.
+    if (hasSubs(cat, cats)) cat = guessCategory(it.note, cats, it.kind, { parentId: cat.id }) || guessCategory(text, cats, it.kind, { parentId: cat.id }) || cat;
+    const guessed = Boolean(cat) && cat.code !== 'other' && cat.code !== 'other_in';
+    // refine — категорию знаем, а подкатегорию нет: под карточкой предложим уточнить.
+    return { ...it, cat: cat || fallbackCategory(cats, it.kind), uncertain: !guessed, refine: guessed && hasSubs(cat, cats) };
   });
 }
 
@@ -432,15 +437,20 @@ async function onEntry(c, text, { source = 'text', statusMsgId = null, transcrip
     const s = saved[0];
     const t = await getTransaction(c.user.tg_id, s.id);
     const header = s.kind === 'income' ? '✅ Записал доход' : '✅ Записал расход';
-    const footer = [s.uncertain ? '🤔 Не уверен в категории — выберите подходящую:' : '', ...warnings].filter(Boolean).join('\n');
+    const footer = [
+      s.uncertain ? '🤔 Не уверен в категории — выберите подходящую:' : '',
+      s.refine ? `↳ Уточнить подкатегорию в «${esc(s.cat.name)}»?` : '',
+      ...warnings,
+    ].filter(Boolean).join('\n');
     const text2 = S.txCardText(t, s.cat, c.user.tz_offset, { header, transcript, footer });
-    const extra = s.uncertain ? await S.categoryPicker(c.user.tg_id, t) : S.txCardKeyboard(t);
+    const extra = s.uncertain ? await S.categoryPicker(c.user.tg_id, t)
+      : s.refine ? await S.subPicker(c.user.tg_id, t, s.cat.id, { done: true }) : S.txCardKeyboard(t);
     return keep(c.chatId, await show(c.chatId, statusMsgId, text2, extra), statusMsgId);
   }
 
   const lines = [`✅ Записал ${saved.length} ${plural(saved.length, 'операцию', 'операции', 'операций')}:`, ''];
   saved.forEach((s, i) => {
-    lines.push(`${i + 1}. <b>${signedMoney(s.kind, s.amount, s.currency)}</b> · ${esc(catLabel(s.cat))}${s.note ? ' — ' + esc(s.note) : ''}${s.uncertain ? ' 🤔' : ''}`);
+    lines.push(`${i + 1}. <b>${signedMoney(s.kind, s.amount, s.currency)}</b> · ${esc(catLabel(s.cat))}${s.note ? ' — ' + esc(s.note) : ''}${s.uncertain ? ' 🤔' : s.refine ? ' ↳?' : ''}`);
   });
   const sums = new Map();
   for (const s of saved) if (s.kind === 'expense') sums.set(s.currency, (sums.get(s.currency) || 0) + s.amount);
@@ -450,7 +460,7 @@ async function onEntry(c, text, { source = 'text', statusMsgId = null, transcrip
   if (day && (day.y !== today.y || day.m !== today.m || day.d !== today.d)) lines.push(`📅 Дата: ${toLocalDay(day)}`);
   if (transcript) lines.push('', `🎙 <i>«${esc(transcript)}»</i>`);
   if (warnings.length) lines.push('', ...warnings);
-  lines.push('', '<i>Нажмите номер, чтобы изменить запись.</i>');
+  lines.push('', saved.some((x) => x.refine) ? '<i>Нажмите номер, чтобы изменить запись или уточнить подкатегорию (↳?).</i>' : '<i>Нажмите номер, чтобы изменить запись.</i>');
   const kb = [saved.slice(0, 10).map((s, i) => btn(`✏️ ${i + 1}`, `t:o:${s.id}`))];
   const ids = saved.map((s) => s.id).join('.');
   if (`t:X:${ids}`.length <= 64) kb.push([btn('🗑 Удалить всё', `t:X:${ids}`)]);
@@ -489,9 +499,11 @@ async function undoLast(c) {
 
 // ── Голосовые ──────────────────────────────────────────────────────────────
 
+// Подсказка Whisper: названия категорий и подкатегорий, чтобы он писал их правильно.
 function whisperHint(cats) {
-  const names = cats.filter((x) => x.kind === 'expense').slice(0, 10).map((x) => x.name.toLowerCase()).join(', ');
-  return `Учёт расходов и доходов. Кофе 250 рублей, такси 450, продукты 1 234 рубля, зарплата 100 000. Категории: ${names}.`;
+  const tops = cats.filter((x) => x.kind === 'expense' && !x.parent_id).slice(0, 10).map((x) => x.name.toLowerCase());
+  const subs = cats.filter((x) => x.parent_id).slice(0, 25).map((x) => x.name.toLowerCase());
+  return `Учёт расходов и доходов. Кофе 250 рублей, такси 450, продукты 1 234 рубля, зарплата 100 000. Категории: ${tops.join(', ')}.${subs.length ? ` Подкатегории: ${subs.join(', ')}.` : ''}`;
 }
 
 async function onVoice(c, msg) {
