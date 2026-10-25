@@ -360,3 +360,23 @@ test('голосом и текстом — в подкатегорию, и ра�
   const stt = fetchLog.find((f) => f.url.includes('/audio/transcriptions'));
   assert.ok(stt.init.body.fields.some(([k, v]) => k === 'prompt' && /Подкатегории: .*дантист/.test(v)), 'Whisper знает подкатегории');
 });
+
+test('Excel из чата: одна подкатегория', async () => {
+  await say('/start');
+  const health = await db.get("SELECT * FROM categories WHERE user_id = 111 AND code = 'health'");
+  await press(`c:as:${health.id}`);
+  await say('Аптека, Дантист');
+  for (const t of ['стоматолог 4000', 'нурофен 300', 'такси 450']) await say(t);
+  await say('📥 Excel');
+  const month = buttons()[0].callback_data.slice(4);
+  await press(`x:c:${month}`);
+  const sub = buttons().find((b) => b.callback_data === `x:cs:${month}:${health.id}`);
+  assert.ok(sub, 'у категории с подкатегориями есть «подкатегории ›»');
+  await press(sub.callback_data);
+  const dantist = await db.get("SELECT id FROM categories WHERE name = 'Дантист'");
+  assert.ok(buttons().some((b) => b.callback_data === `x:g:${month}:${dantist.id}` && /Дантист · 4 000/.test(b.text)));
+  await press(`x:g:${month}:${dantist.id}`);
+  const doc = calls.filter((x) => x.method === 'sendDocument').at(-1);
+  assert.match(doc.params.caption, /Здоровье › Дантист/);
+  assert.match(doc.params.caption, /1 операция/);
+});

@@ -289,15 +289,39 @@ export async function excelCategoryScreen(user, code) {
   const { from, to } = periodBounds(period, user.tz_offset);
   const totals = await totalsByCategory(user.tg_id, from, to);
   const cats = await catsMap(user.tg_id);
-  // Подкатегории выгружаются вместе со своей категорией.
+  // Категория выгружается вместе с подкатегориями; «подкатегории ›» — выбрать одну подкатегорию.
   const list = [];
   for (const kind of ['expense', 'income']) {
     const ofKind = totals.filter((r) => r.kind === kind).map((r) => ({ ...r, total: r.currency === user.currency ? r.total : 0 }));
     list.push(...rollUp(ofKind, cats));
   }
-  const kb = list.map((a) => [btn(`${catLabel(a.cat)} · ${a.total ? money(a.total, user.currency) : a.cnt + ' оп.'}`, `x:g:${code}:${a.id}`)]);
+  const kb = list.map((a) => {
+    const label = `${catLabel(a.cat)} · ${a.total ? money(a.total, user.currency) : a.cnt + ' оп.'}`;
+    return a.subs.length ? [btn(label, `x:g:${code}:${a.id}`), btn('подкатегории ›', `x:cs:${code}:${a.id}`)] : [btn(label, `x:g:${code}:${a.id}`)];
+  });
   kb.push([btn('◀️ Назад', `x:p:${code}`)]);
-  return { text: `🗂 <b>${esc(period.title)}</b>\n\nВыберите категорию для выгрузки:`, extra: inline(kb) };
+  return {
+    text: `🗂 <b>${esc(period.title)}</b>\n\nВыберите категорию для выгрузки — вместе с её подкатегориями. «подкатегории ›» — выгрузить только одну подкатегорию.\n\n<i>Несколько категорий сразу можно отметить в приложении: /app → Ещё.</i>`,
+    extra: inline(kb),
+  };
+}
+
+export async function excelSubScreen(user, code, parentId) {
+  const period = decodePeriod(code);
+  if (!period) return excelPeriodScreen(user);
+  const { from, to } = periodBounds(period, user.tz_offset);
+  const cats = await catsMap(user.tg_id);
+  const parent = cats.get(parentId);
+  if (!parent) return excelCategoryScreen(user, code);
+  const totals = (await totalsByCategory(user.tg_id, from, to))
+    .filter((r) => r.category_id === parentId || (cats.get(r.category_id) || {}).parent_id === parentId);
+  const sumOf = (id) => totals.filter((r) => (id === null || r.category_id === id) && r.currency === user.currency).reduce((s, r) => s + r.total, 0);
+  const kb = [[btn(`${catLabel(parent)} — вся · ${money(sumOf(null), user.currency)}`, `x:g:${code}:${parentId}`)]];
+  const subs = [...cats.values()].filter((x) => x.parent_id === parentId && totals.some((r) => r.category_id === x.id))
+    .sort((a, b) => sumOf(b.id) - sumOf(a.id));
+  for (const x of subs) kb.push([btn(`↳ ${x.name} · ${money(sumOf(x.id), user.currency)}`, `x:g:${code}:${x.id}`)]);
+  kb.push([btn('◀️ Назад', `x:c:${code}`)]);
+  return { text: `🗂 <b>${esc(period.title)}</b> · ${esc(catLabel(parent))}\n\nЧто выгрузить?`, extra: inline(kb) };
 }
 
 // ── Категории ──────────────────────────────────────────────────────────────

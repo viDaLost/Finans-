@@ -353,8 +353,11 @@ const OPS = {
   },
 
   async exportExcel(c, input) {
-    const sel = input.categoryId ? String(+input.categoryId) : input.mode === 'short' ? 'l' : 't';
-    const doc = await excelDocument(c.user, periodOf(c, input.period).code, sel);
+    // Только выбранные категории/подкатегории (categoryIds) или все; mode — полный отчёт или кратко.
+    const ids = (Array.isArray(input.categoryIds) ? input.categoryIds : input.categoryId ? [input.categoryId] : []).map(Number).filter(Boolean).slice(0, 100);
+    const doc = await excelDocument(c.user, periodOf(c, input.period).code, input.mode === 'short' ? 'l' : 't', {
+      ids, mode: input.mode === 'short' ? 'list' : 'tabs',
+    });
     if (doc.error === 'empty') fail(`За период «${doc.period.title}» операций нет.`, 'EMPTY');
     if (doc.error) fail('Не понял период.', 'BAD_PERIOD');
     try {

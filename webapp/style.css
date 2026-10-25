@@ -162,6 +162,13 @@ button { cursor: pointer; border: 0; background: none; padding: 0; }
 .kw { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
 .kw span { background: var(--soft); border-radius: 14px; padding: 4px 6px 4px 10px; font-size: 14px; display: inline-flex; align-items: center; gap: 4px; }
 .kw span button { color: var(--hint); font-size: 16px; padding: 0 4px; }
+.pick-line { display: flex; align-items: center; gap: 8px; background: var(--soft); border-radius: 10px; padding: 8px 8px 8px 12px; min-height: 44px; }
+.pick-line.wide { width: 100%; text-align: left; }
+.pick-line .pl-val { flex: 1; min-width: 0; font-weight: 500; }
+.pick-line .chip { background: var(--card); }
+.row.chk .box { width: 22px; height: 22px; border-radius: 6px; border: 2px solid var(--hint); flex: none; display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 700; color: var(--accent-text); }
+.row.chk .box.on { background: var(--accent); border-color: var(--accent); }
+.row.chk .box.part { background: var(--soft); border-color: var(--accent); color: var(--accent); }
 .hint { font-size: 13px; color: var(--hint); margin: 6px 4px 0; }
 .inline-btns { display: flex; gap: 8px; }
 .inline-btns .btn { margin: 0; }

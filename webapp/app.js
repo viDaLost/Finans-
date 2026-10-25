@@ -23,7 +23,7 @@
     period: '', periodInfo: null,
     summary: null, breakdown: 'expense',
     ops: { items: [], total: 0, totals: null, q: '', kind: '', categoryId: 0, offset: 0 },
-    catsKind: 'expense', exportMode: 'full', exportCat: 0,
+    catsKind: 'expense', exportMode: 'full', exportSel: [],
     stack: [],
   };
 
@@ -469,13 +469,13 @@
         <div class="field"><label>Что положить в таблицу</label><div class="seg">
           <button data-act="exportMode" data-mode="full" class="${S.exportMode === 'full' ? 'on' : ''}">Полный отчёт</button>
           <button data-act="exportMode" data-mode="short" class="${S.exportMode === 'short' ? 'on' : ''}">Кратко</button></div></div>
-        <div class="field"><label>Категория</label><select class="input" id="exportCat">
-          <option value="0">Все категории</option>
-          ${treeOptions('', S.exportCat, { withIncomeMark: true })}
-        </select></div>
+        <div class="field"><label>Период</label>
+          <div class="pick-line"><span class="pl-val">${esc(p ? p.title : '…')}</span><button class="chip" data-act="range">📅 Свои даты</button></div></div>
+        <div class="field"><label>Категории и подкатегории</label>
+          <button class="pick-line wide" data-act="exportCats"><span class="pl-val">${esc(exportSelLabel())}</span><span class="chev">›</span></button></div>
         <p class="hint" style="margin-bottom:12px">${S.exportMode === 'full'
-          ? 'Сводка с долями категорий, все операции с фильтром, траты по категориям, по дням и месяцам.'
-          : 'Сводка и список операций.'} Период — ${esc(p ? p.title : '…')} (меняется вверху).</p>
+          ? 'Сводка с долями категорий и подкатегорий, все операции с фильтром, траты по категориям, по дням и месяцам.'
+          : 'Сводка с долями и список операций.'}${S.exportSel.length ? ' Доли считаются внутри выбранного.' : ''}</p>
         <button class="btn" data-act="export">Отправить таблицу в чат</button></div>
 
       <div class="card"><h3><span>⚙️ Настройки</span></h3>
@@ -643,6 +643,44 @@
           <button class="btn" data-act="saveBudget">Сохранить</button>
           ${cur ? '<button class="btn danger" data-act="removeBudget">Убрать лимит</button>' : ''}
           <p class="hint">Бюджеты считаются по основной валюте за календарный месяц. В чате бот предупредит на 80% и 100%.</p>`;
+      },
+    });
+  }
+
+  // Что попадёт в выгрузку: «Все категории» или «💊 Здоровье, Транспорт › Такси».
+  function exportSelLabel() {
+    const list = S.exportSel.map(cat).filter(Boolean);
+    if (!list.length) return 'Все категории';
+    return list.map((c) => `${catEmoji(c)} ${catName(c)}`).join(', ');
+  }
+
+  // Отметить категории и подкатегории для выгрузки. Отмеченная категория — вся, с подкатегориями.
+  function openExportCatsSheet() {
+    const F = { type: 'exportCats', sel: new Set(S.exportSel) };
+    openSheet({
+      F,
+      html() {
+        const box = (on, partial) => `<span class="box ${on ? 'on' : partial ? 'part' : ''}">${on ? '✓' : partial ? '–' : ''}</span>`;
+        let out = `<h2><span>Что выгрузить</span><button class="x" data-act="close">✕</button></h2>
+          <p class="hint" style="margin:-6px 4px 10px">Отметьте категорию целиком или только нужные подкатегории. Ничего не отмечено — выгрузятся все.</p>`;
+        for (const [kind, title] of [['expense', 'Расходы'], ['income', 'Доходы']]) {
+          out += `<div class="day-head"><span>${title}</span></div><div class="list">`;
+          for (const c of activeCats(kind)) {
+            const subs = subsOf(c.id);
+            const whole = F.sel.has(c.id);
+            const some = !whole && subs.some((x) => F.sel.has(x.id));
+            out += `<button class="row chk" data-act="selCat" data-id="${c.id}">${box(whole, some)}<span class="ico">${esc(c.emoji || '🏷')}</span>
+              <span class="main"><div class="title">${esc(c.name)}</div>${subs.length ? `<div class="sub">${subs.length} ${plural(subs.length, 'подкатегория', 'подкатегории', 'подкатегорий')}</div>` : ''}</span></button>`;
+            for (const x of subs) {
+              out += `<button class="row chk subrow" data-act="selCat" data-id="${x.id}">${box(whole || F.sel.has(x.id), false)}
+                <span class="main"><div class="title">${esc(x.name)}</div></span></button>`;
+            }
+          }
+          out += '</div>';
+        }
+        return out + `<div class="inline-btns" style="position:sticky;bottom:0;background:var(--card);padding-top:8px">
+          <button class="btn secondary" data-act="selNone">Все категории</button>
+          <button class="btn" data-act="selDone">Готово${F.sel.size ? ` (${F.sel.size})` : ''}</button></div>`;
       },
     });
   }
@@ -836,8 +874,28 @@
     },
 
     exportMode(d) { S.exportMode = d.mode; tap(); render(); },
+    exportCats: () => openExportCatsSheet(),
+    selCat(d) {
+      const sel = topSheet().F.sel;
+      const c = cat(+d.id);
+      if (!c) return;
+      if (!c.parentId) {
+        // Категория целиком: отмечаем её, отметки отдельных подкатегорий больше не нужны.
+        if (sel.has(c.id)) sel.delete(c.id);
+        else { sel.add(c.id); for (const x of subsOf(c.id)) sel.delete(x.id); }
+      } else if (sel.has(c.parentId)) {
+        // Была отмечена вся категория — снимаем одну подкатегорию: остаются остальные.
+        sel.delete(c.parentId);
+        for (const x of subsOf(c.parentId)) if (x.id !== c.id) sel.add(x.id);
+      } else if (sel.has(c.id)) sel.delete(c.id);
+      else sel.add(c.id);
+      tap();
+      rerenderSheet();
+    },
+    selNone() { topSheet().F.sel.clear(); tap(); rerenderSheet(); },
+    selDone() { S.exportSel = [...topSheet().F.sel]; closeSheet(); render(); },
     async export(d, el) {
-      const r = await run(() => call('exportExcel', { period: S.period, mode: S.exportMode, categoryId: S.exportCat }), el);
+      const r = await run(() => call('exportExcel', { period: S.period, mode: S.exportMode, categoryIds: S.exportSel }), el);
       if (!r) return;
       haptic();
       toast(`📥 Таблица отправлена в чат с ботом (${r.count} ${plural(r.count, 'операция', 'операции', 'операций')})`);
@@ -915,7 +973,6 @@
     searchTimer = setTimeout(() => loadOps(true), 350);
   });
   $app.addEventListener('change', async (e) => {
-    if (e.target.id === 'exportCat') { S.exportCat = +e.target.value; return; }
     if (e.target.id === 'setCur' || e.target.id === 'setTz') {
       const data = e.target.id === 'setCur' ? { currency: e.target.value } : { tz: +e.target.value };
       const r = await run(() => call('saveSettings', data));

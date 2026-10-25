@@ -170,3 +170,29 @@ test('подкатегории в приложении', async () => {
   const moved = await call('saveCategory', { id: pharmacy.id, name: 'Аптека', parentId: 0 });
   assert.equal(moved.categories.find((c) => c.id === pharmacy.id).parentId, 0, 'подкатегорию можно сделать самостоятельной');
 });
+
+test('Excel за период только по выбранным категориям и подкатегориям', async () => {
+  await say('/start');
+  const { categories, periods } = await call('init');
+  const health = categories.find((c) => c.code === 'health');
+  const transport = categories.find((c) => c.code === 'transport');
+  const r = await call('addSubs', { parentId: health.id, names: ['Аптека', 'Дантист'] });
+  const dantist = r.categories.find((c) => c.name === 'Дантист');
+  for (const t of ['стоматолог 4000', 'нурофен 300', 'такси 450', 'кофе 250', 'продукты 3000']) await call('quickAdd', { text: t });
+
+  const one = await call('exportExcel', { period: periods.month, categoryIds: [dantist.id] });
+  assert.equal(one.count, 1, 'только подкатегория «Дантист»');
+  const both = await call('exportExcel', { period: periods.month, categoryIds: [dantist.id, transport.id] });
+  assert.equal(both.count, 2, 'подкатегория + категория');
+  const doc = calls.filter((x) => x.method === 'sendDocument').at(-1);
+  assert.match(doc.params.caption, /Здоровье › Дантист, 🚕 Транспорт/);
+  assert.match(doc.params.document.name, /_vybor-2\.xlsx$/);
+  const xml = new TextDecoder().decode(doc.params.document.bytes);
+  assert.match(xml, /Только: 💊 Здоровье › Дантист, 🚕 Транспорт/);
+  assert.match(xml, /Доли считаются внутри выборки/);
+  assert.doesNotMatch(xml, /кофе/, 'чужих категорий в файле нет');
+
+  const whole = await call('exportExcel', { period: periods.month, categoryIds: [health.id, dantist.id] });
+  assert.equal(whole.count, 2, 'категория целиком включает подкатегории');
+  assert.equal(await code(call('exportExcel', { period: 'd20200101', categoryIds: [health.id] })), 'EMPTY', 'за пустой период — понятная ошибка');
+});

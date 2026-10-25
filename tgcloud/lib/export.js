@@ -36,10 +36,12 @@ function barText(share) {
 }
 
 /**
- * opts: { period, tz, mainCurrency, txs, catsById, category (или null), mode: 'tabs' | 'list' }
+ * opts: { period, tz, mainCurrency, txs, catsById, category (или null), scope, mode: 'tabs' | 'list' }
+ * category — выгрузка одной категории или подкатегории; scope — несколько выбранных
+ * категорий/подкатегорий (txs уже отфильтрованы по ним).
  * Возвращает { bytes, filename, stats }.
  */
-export function buildWorkbook({ period, tz, mainCurrency, txs, catsById, category = null, mode = 'tabs' }) {
+export function buildWorkbook({ period, tz, mainCurrency, txs, catsById, category = null, scope = null, mode = 'tabs' }) {
   const currencies = orderCurrencies(txs, mainCurrency);
   const multi = currencies.length > 1;
   // Одна валюта — символ прямо в ячейке («3 000 ₽»); копейки, только если они есть.
@@ -63,20 +65,23 @@ export function buildWorkbook({ period, tz, mainCurrency, txs, catsById, categor
   const months = new Set(rows.map((r) => r.l.y * 100 + r.l.m)).size;
   // Колонка «Подкатегория» появляется, когда в выгрузке есть записи в подкатегориях.
   const withSub = rows.some((r) => r.sub);
-  const ctx = { period, tz, rows, currencies, multi, category, fromYmd, toYmd, main: currencies[0], withSub };
+  const selection = scope && scope.length ? scope : category ? [category] : null;
+  const ctx = { period, tz, rows, currencies, multi, category, selection, fromYmd, toYmd, main: currencies[0], withSub };
+  // Листы с разбивкой нужны, когда в выгрузке больше одной категории или есть подкатегории.
+  const split = new Set(rows.map((r) => (r.top ? r.top.id : 0))).size > 1 || withSub;
 
   buildSummary(wb, ctx);
   buildOperations(wb, ctx);
-  if (mode === 'tabs' && !category) {
-    buildByCategory(wb, ctx);
+  if (mode === 'tabs') {
+    if (split) buildByCategory(wb, ctx);
     buildDaily(wb, ctx);
   }
   if (mode === 'tabs' && months > 1) {
     buildMonthly(wb, ctx);
-    if (!category) buildCategoryMonths(wb, ctx);
+    if (split) buildCategoryMonths(wb, ctx);
   }
 
-  const suffix = category ? '_' + translit(category.name) : '';
+  const suffix = category ? '_' + translit(category.name) : selection ? `_vybor-${selection.length}` : '';
   const filename = `finance_${periodSlug(period)}${suffix}.xlsx`;
   return { bytes: wb.toBytes(), filename, stats: totalsByCurrency(rows) };
 }
@@ -143,16 +148,20 @@ function groupByCategory(list) {
 // ── Сводка ─────────────────────────────────────────────────────────────────
 
 function buildSummary(wb, ctx) {
-  const { period, rows, currencies, multi, category, fromYmd, toYmd, tz } = ctx;
+  const { period, rows, currencies, multi, category, selection, fromYmd, toYmd, tz } = ctx;
   const ws = wb.addSheet('Сводка', { widths: [34, 17, 11, 24, 11, 16], tab: '1F4E78' });
-  ws.row([{ v: `Учёт финансов · ${period.title}${category ? ' · ' + catTitle(category) : ''}`, s: 'title' }], { height: 26 });
+  ws.row([{ v: `Учёт финансов · ${period.title}${category ? ' · ' + catTitle(category) : selection ? ' · выборка' : ''}`, s: 'title' }], { height: 26 });
   ws.merge('A1:F1');
+  if (selection && !category) {
+    const n = ws.row([{ v: `Только: ${selection.map(catTitle).join(', ')}`.slice(0, 250), s: 'note' }], { height: selection.length > 3 ? 32 : 18 });
+    ws.merge(`A${n}:F${n}`);
+  }
   const now = toLocal(Math.floor(Date.now() / 1000), tz);
   const parts = [];
   if (fromYmd) parts.push(`${fmtYmd(fromYmd)} — ${fmtYmd(toYmd)}`);
   parts.push(`сформировано ${fmtYmd(now)} в ${String(now.hh).padStart(2, '0')}:${String(now.mi).padStart(2, '0')}`);
-  ws.row([{ v: cap(parts.join(' · ')), s: 'subtitle' }]);
-  ws.merge('A2:F2');
+  const sub = ws.row([{ v: cap(parts.join(' · ')), s: 'subtitle' }]);
+  ws.merge(`A${sub}:F${sub}`);
 
   if (!rows.length) {
     ws.row([]);
@@ -178,9 +187,11 @@ function buildSummary(wb, ctx) {
 
     ws.row([]);
     ws.row([{ v: multi ? `Итоги в ${cur}` : 'Итоги', s: 'section' }], { height: 20 });
-    ws.row([{ v: 'Потрачено', s: 'kpiLabel' }, { v: toUnits(exp), s: 'kpiRed' }]);
-    ws.row([{ v: 'Получено', s: 'kpiLabel' }, { v: toUnits(inc), s: 'kpiGreen' }]);
-    ws.row([{ v: 'Остаток (получено − потрачено)', s: 'kpiLabel' }, { v: toUnits(inc - exp), s: 'kpiMoney' }]);
+    // В выборке только расходов (или только доходов) «остаток» ничего не значит — не показываем.
+    const both = !ctx.selection || (exp && inc);
+    if (exp || both) ws.row([{ v: 'Потрачено', s: 'kpiLabel' }, { v: toUnits(exp), s: 'kpiRed' }]);
+    if (inc || both) ws.row([{ v: 'Получено', s: 'kpiLabel' }, { v: toUnits(inc), s: 'kpiGreen' }]);
+    if (both) ws.row([{ v: 'Остаток (получено − потрачено)', s: 'kpiLabel' }, { v: toUnits(inc - exp), s: 'kpiMoney' }]);
     ws.row([{ v: 'Операций', s: 'kpiLabel' }, { v: list.length, s: 'kpiInt' }]);
     if (exp) {
       ws.row([{ v: days > 1 ? `В среднем тратите в день (${days} дн.)` : 'Потрачено за день', s: 'kpiLabel' }, { v: toUnits(exp / days), s: 'kpiPlain' }]);
@@ -212,8 +223,8 @@ function buildSummary(wb, ctx) {
   }
 
   ws.row([]);
-  const tip = category
-    ? 'Все операции этой категории — на вкладке «Операции».'
+  const tip = selection
+    ? 'Доли считаются внутри выборки. Все её операции — на вкладке «Операции» (фильтр ▾ по категории и подкатегории), динамика — «По дням» и «По месяцам».'
     : 'Вкладки внизу: «Операции» — полный список (стрелки ▾ в заголовках фильтруют по дате и категории, итог внизу пересчитывается), «По категориям» — траты, сгруппированные по категориям, «По дням» и «По месяцам» — динамика.';
   const n = ws.row([{ v: tip, s: 'note' }], { height: 45 });
   ws.merge(`A${n}:F${n}`);

@@ -337,7 +337,7 @@ function helpText() {
     '',
     '<b>📊 Отчёты и таблицы</b>',
     '• «📊 Отчёт» — расходы и доходы по категориям, листайте ◀️ ▶️',
-    '• «📥 Excel» — таблица за любой период: сводка, все операции, траты по категориям, по дням и месяцам. Или одна категория.',
+    '• «📥 Excel» — таблица за любой период: сводка, все операции, траты по категориям, по дням и месяцам. Или только одна категория или подкатегория («🗂 Одна категория»); несколько сразу — в приложении /app → Ещё.',
     '• Командой: <code>/excel сентябрь</code>, <code>/excel 01.09-15.09</code>, <code>/report 2025</code>',
     '',
     '<b>🎯 Бюджет</b>: <code>/budget 50000</code> — на месяц, <code>/budget продукты 15000</code> — на категорию.',
@@ -841,6 +841,7 @@ async function onButton(c, data) {
       return showScreen(c, s);
     }
     if (p[1] === 'c') { await ok(); return showScreen(c, await S.excelCategoryScreen(c.user, p[2])); }
+    if (p[1] === 'cs') { await ok(); return showScreen(c, await S.excelSubScreen(c.user, p[2], +p[3])); }
     if (p[1] === 'g') { await ok('Готовлю таблицу…'); return sendExcel(c, p[2], p[3]); }
     return ok();
   }
@@ -989,29 +990,40 @@ async function learn(uid, note, cat) {
 // ── Excel ──────────────────────────────────────────────────────────────────
 
 /**
- * Готовит Excel-файл за период. sel: 't' — полный отчёт, 'l' — кратко, id — одна категория.
+ * Готовит Excel-файл за период. sel: 't' — полный отчёт, 'l' — кратко, id или «id.id.id» — только эти
+ * категории/подкатегории. opts.ids — то же списком, opts.mode — 'tabs' | 'list' (для приложения).
  * Возвращает { document, caption, count } или { error: 'period' | 'empty', period }.
  */
-export async function excelDocument(user, code, sel) {
+export async function excelDocument(user, code, sel, { ids: picked = null, mode = null } = {}) {
   const period = decodePeriod(code);
   if (!period) return { error: 'period' };
   const tz = user.tz_offset;
   const { from, to } = periodBounds(period, tz);
   const catsById = await S.catsMap(user.tg_id);
   let txs = await transactionsInRange(user.tg_id, from, to);
-  let category = null;
-  if (sel && /^\d+$/.test(String(sel))) {
-    category = catsById.get(+sel) || { id: +sel, name: 'Без категории', emoji: '' };
-    // Категория выгружается вместе с подкатегориями.
-    const ids = new Set([+sel, ...[...catsById.values()].filter((x) => x.parent_id === +sel).map((x) => x.id)]);
-    txs = txs.filter((t) => ids.has(t.category_id));
+  let ids = picked && picked.length ? picked.map(Number).filter(Boolean) : null;
+  if (!ids && sel && /^\d+(\.\d+)*$/.test(String(sel))) ids = String(sel).split('.').map(Number);
+  let category = null, scope = null;
+  if (ids && ids.length) {
+    const chosen = ids.map((id) => catsById.get(id) || { id, name: 'Без категории', emoji: '' });
+    // Выбранная категория — вместе с подкатегориями, выбранная подкатегория — только она.
+    const keep = new Set();
+    for (const c of chosen) {
+      keep.add(c.id);
+      for (const x of catsById.values()) if (x.parent_id === c.id) keep.add(x.id);
+    }
+    txs = txs.filter((t) => keep.has(t.category_id));
+    // Отмечены и категория, и её подкатегория — в названии достаточно категории.
+    const shown = chosen.filter((c) => !(c.parent_id && ids.includes(c.parent_id)));
+    if (shown.length === 1) category = shown[0]; else scope = shown;
   }
   if (!txs.length) return { error: 'empty', period };
 
   const { bytes, filename, stats } = buildWorkbook({
-    period, tz, mainCurrency: user.currency, txs, catsById, category, mode: sel === 'l' ? 'list' : 'tabs',
+    period, tz, mainCurrency: user.currency, txs, catsById, category, scope, mode: mode || (sel === 'l' ? 'list' : 'tabs'),
   });
-  const lines = [`📥 <b>${esc(period.title)}</b>${category ? ' · ' + esc(catLabel(category)) : ''}`];
+  const what = category ? catLabel(category) : scope ? scope.map(catLabel).join(', ') : '';
+  const lines = [`📥 <b>${esc(period.title)}</b>${what ? ' · ' + esc(what.length > 300 ? what.slice(0, 299) + '…' : what) : ''}`];
   for (const [cur, s] of stats) {
     lines.push(`${stats.size > 1 ? cur + ': ' : ''}💸 ${money(s.expense, cur)} · 💰 ${money(s.income, cur)}`);
   }
